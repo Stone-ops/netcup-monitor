@@ -116,7 +116,8 @@ docker compose up -d
 ~~~bash
 # 步骤 1: 强制拉取最新的镜像版本
 docker compose pull
-
+# 如果拉取失败: 注销 ghcr.io
+docker logout ghcr.io
 # 步骤 2: 停止旧容器，使用最新镜像重新创建并启动
 docker compose up -d --force-recreate
 ~~~
@@ -154,10 +155,11 @@ docker compose up -d --force-recreate
 
 ## 📸 界面预览
 ### 仪表盘
-*(此处可放置 dashboard.png)*
+<img width="1545" height="1271" alt="PixPin_2025-12-26_20-46-59" src="https://github.com/user-attachments/assets/bf7658c7-9805-4866-b962-9d177f6e50e4" />
 
 ### 流量统计
-*(此处可放置 traffic.png)*
+<img width="1534" height="1253" alt="PixPin_2025-12-26_20-46-34" src="https://github.com/user-attachments/assets/ebb135bf-4af8-4932-ae21-6101ecf23bb0" />
+
 
 <h2 id="disclaimer">⚠️ 免责声明</h2>
 
