@@ -27,12 +27,18 @@ def setup_logging():
     logger = logging.getLogger('NC_Monitor')
     logger.setLevel(logging.INFO)
     if logger.hasHandlers(): logger.handlers.clear()
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - [%(funcName)s] %(message)s')
+    
+    # 修改：增强日志格式，包含具体时间
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - [%(funcName)s:%(lineno)d] - %(message)s')
+    
     sh = logging.StreamHandler()
     sh.setFormatter(formatter)
     logger.addHandler(sh)
+    
     if not os.path.exists(DATA_DIR): os.makedirs(DATA_DIR)
-    fh = TimedRotatingFileHandler(filename=LOG_FILE, when='midnight', interval=1, backupCount=3, encoding='utf-8')
+    
+    # 修改：日志轮转策略，每天午夜轮转，保留 1 天备份 (自动清除超过24-48小时的日志)
+    fh = TimedRotatingFileHandler(filename=LOG_FILE, when='midnight', interval=1, backupCount=1, encoding='utf-8')
     fh.setFormatter(formatter)
     logger.addHandler(fh)
     return logger
@@ -63,10 +69,16 @@ def load_config():
     try:
         if not os.path.exists(CONFIG_FILE): return {}
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f: return json.load(f)
-    except: return {}
+    except Exception as e:
+        logger.error(f"加载配置文件失败: {e}")
+        return {}
 
 def save_config_file(data):
-    with open(CONFIG_FILE, 'w', encoding='utf-8') as f: json.dump(data, f, indent=2, ensure_ascii=False)
+    try:
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f: json.dump(data, f, indent=2, ensure_ascii=False)
+        logger.info("配置文件已更新并保存")
+    except Exception as e:
+        logger.error(f"保存配置文件失败: {e}")
 
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
@@ -91,6 +103,7 @@ def log_to_db(name, state, up_total, dl_total):
             last_id, last_state, start_time = last_event
             duration = now - start_time
             if last_state != state:
+                logger.info(f"[{name}] 状态变更: {last_state} -> {state}")
                 c.execute("UPDATE state_events SET end_time=?, duration=? WHERE id=?", (now, duration, last_id))
                 c.execute("INSERT INTO state_events (server_name, start_time, state) VALUES (?, ?, ?)", (name, now, state))
             else:
@@ -101,7 +114,7 @@ def log_to_db(name, state, up_total, dl_total):
         conn.commit()
         conn.close()
     except Exception as e:
-        logger.error(f"DB Write Error: {e}")
+        logger.error(f"数据库写入错误: {e}")
 
 # ===================== 数据计算逻辑 (包含趋势) =====================
 def calculate_traffic(conn, name):
@@ -166,7 +179,6 @@ def calculate_health(conn, name):
     return state, dur, t_day, avg_daily
 
 def get_daily_trends(conn, server_list):
-    """获取近7天的趋势数据"""
     dates = []
     trends = {}
     today = datetime.date.today()
@@ -178,12 +190,10 @@ def get_daily_trends(conn, server_list):
     for s in server_list:
         name = s['name']
         trends[name] = {'health': [], 'traffic': []}
-        
         start_7d = (datetime.datetime.now() - datetime.timedelta(days=7)).timestamp()
         c = conn.cursor()
         c.execute("SELECT timestamp, up_total, dl_total FROM traffic_log WHERE server_name=? AND timestamp >= ? ORDER BY timestamp ASC", (name, start_7d))
         logs = c.fetchall()
-        
         c.execute("SELECT start_time, end_time FROM state_events WHERE server_name=? AND state='low' AND (end_time >= ? OR end_time IS NULL)", (name, start_7d))
         events = c.fetchall()
         
@@ -213,7 +223,6 @@ def get_daily_trends(conn, server_list):
                 overlap_end = min(e_end, day_end)
                 if overlap_end > overlap_start:
                     day_throttled += (overlap_end - overlap_start)
-            
             trends[name]['health'].append(round(day_throttled / 3600, 1))
 
     return dates, trends
@@ -230,9 +239,11 @@ def login():
     tgt = cfg.get('admin_password_hash')
     h = hash_password(pwd)
     
+    ip = request.remote_addr
     if tgt:
         if h == tgt:
             session['logged_in'] = True
+            logger.info(f"管理员登录成功 (IP: {ip})")
             return jsonify({"status": "success"})
     else:
         pln = cfg.get('admin_password', 'admin')
@@ -241,12 +252,16 @@ def login():
             if 'admin_password' in cfg: del cfg['admin_password']
             save_config_file(cfg)
             session['logged_in'] = True
+            logger.info(f"管理员登录成功并初始化哈希 (IP: {ip})")
             return jsonify({"status": "success"})
-
+    
+    logger.warning(f"管理员登录失败 (IP: {ip})")
     return jsonify({"status": "error"}), 401
 
 @app.route('/api/auth/logout', methods=['POST'])
-def logout(): session.pop('logged_in', None); return jsonify({"status": "success"})
+def logout(): 
+    session.pop('logged_in', None)
+    return jsonify({"status": "success"})
 
 @app.route('/api/auth/status')
 def check_status(): return jsonify({"logged_in": session.get('logged_in', False)})
@@ -267,12 +282,27 @@ def handle_config():
     if not session.get('logged_in'): return jsonify({})
     return jsonify(load_config())
 
-# Run Now API 增加登录校验
 @app.route('/api/run_now', methods=['POST'])
 def manual_run():
     if not session.get('logged_in'): return jsonify({"status": "error"}), 401
+    logger.info(f"用户触发手动刷新 (IP: {request.remote_addr})")
     scheduler.get_job('monitor_job').modify(next_run_time=datetime.datetime.now())
     return jsonify({"status": "ok"})
+
+# 新增：日志获取接口
+@app.route('/api/logs')
+def get_logs():
+    if not session.get('logged_in'): return jsonify({"status": "error"}), 401
+    try:
+        if os.path.exists(LOG_FILE):
+            with open(LOG_FILE, 'r', encoding='utf-8') as f:
+                # 读取所有内容，因为有轮转，文件不会无限大
+                content = f.read()
+                return jsonify({"status": "success", "data": content})
+        return jsonify({"status": "success", "data": "暂无日志文件"})
+    except Exception as e:
+        logger.error(f"读取日志文件失败: {e}")
+        return jsonify({"status": "error", "message": str(e)})
 
 @app.route('/api/stats_advanced')
 def get_stats_advanced():
@@ -333,10 +363,14 @@ class EnhancedVertexClient:
                     if r.status_code in [200, 302] and "connect.sid" in s.cookies:
                         sid = s.cookies["connect.sid"]
                         self._save_sid(sid)
+                        logger.info("Vertex 重新登录成功，获取新 SID")
                         return sid
                 except: continue
+            logger.warning("Vertex 登录失败")
             return None
-        except Exception: return None
+        except Exception as e: 
+            logger.error(f"Vertex 客户端初始化错误: {e}")
+            return None
     def _save_sid(self, sid):
         try:
             full = load_config()
@@ -371,30 +405,33 @@ class EnhancedVertexClient:
         try:
             url = f"{self.base_url}/api/rss/modify"
             r = requests.post(url, json=data, cookies={"connect.sid": sid}, headers={"Content-Type": "application/json"}, timeout=10)
-            return r.status_code == 200 and "成功" in r.text
-        except: return False
+            success = r.status_code == 200 and "成功" in r.text
+            if not success: logger.warning(f"Vertex RSS 更新响应异常: {r.text[:100]}")
+            return success
+        except Exception as e: 
+            logger.error(f"Vertex RSS 更新请求失败: {e}")
+            return False
     def restart_container(self):
         if "localhost" not in self.base_url and "127.0.0.1" not in self.base_url: return False
         try:
             subprocess.run(["docker", "restart", self.container_name], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            logger.info("Vertex 容器重启命令已执行")
             return True
-        except: return False
+        except Exception as e: 
+            logger.error(f"Vertex 容器重启失败: {e}")
+            return False
 
-# 新增：统一通知函数 (TG & WeChat Webhook & WeChat App)
 def send_notifications(config):
     global last_notify_time
-    # 2小时冷却时间
     if time.time() - last_notify_time < 7200: return
 
-    notify_mode = config.get("notify_mode", "telegram") # telegram, wechat, wechat_app, all
+    notify_mode = config.get("notify_mode", "telegram") 
     
     try:
         servers = config.get("servers", [])
         conn = sqlite3.connect(DB_FILE)
         
-        # 文本内容生成 (Telegram HTML)
         tg_lines = [f"📊 <b>服务器状态简报</b> ({datetime.datetime.now().strftime('%H:%M')})", ""]
-        # 文本内容生成 (WeChat Markdown)
         wx_lines = [f"### 📊 服务器状态简报 ({datetime.datetime.now().strftime('%H:%M')})"]
         
         for s in servers:
@@ -405,15 +442,12 @@ def send_notifications(config):
             total_seconds_today = (now - start_of_day).total_seconds()
             t_day_high = max(0, total_seconds_today - t_day_throttled)
             
-            # Icons
             status_icon = "✅ 高速" if state == 'high' else "⚠️ 限速"
             
-            # TG Format
             tg_lines.append(f"<b>{name}</b>")
             tg_lines.append(f"当前: {status_icon} (持续 {format_duration(dur)})")
             tg_lines.append(f"今日: 高速 {format_duration(t_day_high)} | 限速 {format_duration(t_day_throttled)}\n")
             
-            # WeChat Format
             wx_lines.append(f"**{name}**")
             wx_lines.append(f"> 当前: {status_icon} (持续 {format_duration(dur)})")
             wx_lines.append(f"> 今日: 高速 {format_duration(t_day_high)} | 限速 {format_duration(t_day_throttled)}\n")
@@ -423,7 +457,7 @@ def send_notifications(config):
         tg_text = "\n".join(tg_lines)
         wx_text = "\n".join(wx_lines)
         
-        # 1. 发送 Telegram
+        # 1. Telegram
         if notify_mode in ['telegram', 'all']:
             tg_conf = config.get("telegram_config", {})
             token = tg_conf.get("bot_token")
@@ -434,7 +468,7 @@ def send_notifications(config):
                     logger.info("Telegram 通知发送成功")
                 except Exception as e: logger.error(f"Telegram 发送失败: {e}")
         
-        # 2. 发送 企业微信 Webhook (机器人)
+        # 2. Webhook
         if notify_mode in ['wechat', 'all']:
             wx_key = config.get("wechat_config", {}).get("key")
             if wx_key:
@@ -444,7 +478,7 @@ def send_notifications(config):
                     logger.info("企业微信(Webhook)通知发送成功")
                 except Exception as e: logger.error(f"企业微信(Webhook)发送失败: {e}")
 
-        # 3. 发送 企业微信应用 (App)
+        # 3. App
         if notify_mode in ['wechat_app', 'all']:
             try:
                 wca = config.get("wechat_app_config", {})
@@ -453,14 +487,12 @@ def send_notifications(config):
                 agentid = wca.get("agentid")
                 
                 if corpid and secret and agentid:
-                    # 获取 Token
                     token_url = f"https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid={corpid}&corpsecret={secret}"
                     r = requests.get(token_url, timeout=10)
                     token_data = r.json()
                     
                     if token_data.get("errcode") == 0:
                         access_token = token_data.get("access_token")
-                        # 发送消息
                         send_url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={access_token}"
                         payload = {
                             "touser": "@all",
@@ -485,13 +517,11 @@ def run_monitor_task():
     if not config: return
     SERVERS = config.get("servers", [])
     
-    # 策略配置
     KEEP_CATS = config.get("keep_categories", [])
-    # 新增：HR 策略参数
     HR_CONFIG = config.get("hr_config", {})
     HR_CATS = HR_CONFIG.get("categories", [])
     HR_LIMIT_KB = int(HR_CONFIG.get("upload_limit_kb", 10))
-    HR_LIMIT_BYTES = HR_LIMIT_KB * 1024 # 转为字节
+    HR_LIMIT_BYTES = HR_LIMIT_KB * 1024
     
     QB_CONF = config.get("qb_config", {})
     vertex = EnhancedVertexClient(config)
@@ -502,14 +532,19 @@ def run_monitor_task():
             with requests.Session() as s:
                 s.post(f"{base}/auth/login", data={"username": QB_CONF.get("user"), "password": QB_CONF.get("password")}, timeout=5)
                 url = f"{base}{endpoint}"
-                return s.post(url, data=data, timeout=15) if data else s.get(url, timeout=15)
-        except: return None
+                res = s.post(url, data=data, timeout=15) if data else s.get(url, timeout=15)
+                return res
+        except Exception as e: 
+            logger.error(f"QB 连接失败 ({ip}): {e}")
+            return None
         
     def qb_smart_action(ip, action, hashes):
         r = qb_req(ip, f"/torrents/{action}", data={"hashes": hashes})
         if not r or r.status_code not in [200, 204]:
             fallback = {'stop': 'pause', 'start': 'resume'}
-            if action in fallback: qb_req(ip, f"/torrents/{fallback[action]}", data={"hashes": hashes})
+            if action in fallback: 
+                logger.warning(f"QB 动作 {action} 失败，尝试 fallback: {fallback[action]}")
+                qb_req(ip, f"/torrents/{fallback[action]}", data={"hashes": hashes})
             
     vps_status = {}
     soap = config.get("soap_config", {})
@@ -517,10 +552,7 @@ def run_monitor_task():
     if soap:
         try:
             wsdl_url = soap.get("wsdl_url")
-            if not wsdl_url:
-                wsdl_url = "https://www.servercontrolpanel.de/WSEndUser?wsdl"
-                logger.info("未配置 WSDL URL，使用默认值: " + wsdl_url)
-                
+            if not wsdl_url: wsdl_url = "https://www.servercontrolpanel.de/WSEndUser?wsdl"
             client = Client(wsdl_url)
             targets = [s['ip'] for s in SERVERS]
             for acc in soap.get("accounts", []):
