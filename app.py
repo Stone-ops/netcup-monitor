@@ -239,16 +239,30 @@ def login():
     data = request.json
     pwd = data.get('password')
     cfg = load_config()
+    
+    # 修复后的安全逻辑：
     tgt = cfg.get('admin_password_hash')
-    pln = cfg.get('admin_password', 'admin')
     h = hash_password(pwd)
-    if (tgt and h == tgt) or (pwd == pln):
-        if not tgt: 
+    
+    # 1. 如果存在哈希，强制且只能匹配哈希
+    if tgt:
+        if h == tgt:
+            session['logged_in'] = True
+            return jsonify({"status": "success"})
+    
+    # 2. 只有在没有哈希（未初始化或手动清空）时，才允许默认或明文密码
+    else:
+        pln = cfg.get('admin_password', 'admin') # 默认 fallback 为 admin
+        if pwd == pln:
+            # 登录成功后，立即生成哈希并删除明文
             cfg['admin_password_hash'] = h
             if 'admin_password' in cfg: del cfg['admin_password']
             save_config_file(cfg)
-        session['logged_in'] = True
-        return jsonify({"status": "success"})
+            
+            session['logged_in'] = True
+            return jsonify({"status": "success"})
+
+    # 其他情况一律失败
     return jsonify({"status": "error"}), 401
 
 @app.route('/api/auth/logout', methods=['POST'])
