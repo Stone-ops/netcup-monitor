@@ -11,11 +11,11 @@
   </p>
 
   <p>
-    <a href="#-功能特性">功能特性</a> • 
-    <a href="#-自动化策略逻辑">工作原理</a> • 
-    <a href="#-部署指南">部署指南</a> • 
-    <a href="#-配置详解">配置详解</a> • 
-    <a href="#faq">常见问题</a>
+    <a href="#features">功能特性</a> • 
+    <a href="#logic">工作原理</a> • 
+    <a href="#deploy">部署指南</a> • 
+    <a href="#config">配置详解</a> • 
+    <a href="#disclaimer">免责声明</a>
   </p>
 </div>
 
@@ -27,7 +27,7 @@
 
 不同于普通的监控脚本，本项目通过对接 Netcup 官方 SOAP API 精准识别服务器状态。当检测到限速时，它能自动指挥 **qBittorrent** 和 **Vertex** 进行精细化的流量规避，并在限速解除后自动恢复生产，实现真正的“无人值守”。
 
-## ✨ 功能特性
+<h2 id="features">✨ 功能特性</h2>
 
 ### 🛡️ 智能流控策略
 * **HR 智能保护**：限速期间，对 **下载中** 的 HR 种子自动暂停，对 **做种中** 的 HR 种子限制上传速度（保种模式），防止因删种导致 HR 考核失败。
@@ -52,7 +52,7 @@
 * **Telegram Bot**：支持富文本状态简报。
 * **企业微信**：支持 Webhook 机器人及企业微信应用（App）推送。
 
-## 🧠 自动化策略逻辑
+<h2 id="logic">🧠 自动化策略逻辑</h2>
 
 系统每 5 分钟（默认）检测一次状态，根据 Netcup API 返回的 `trafficThrottled` 状态执行以下逻辑：
 
@@ -64,7 +64,7 @@
 | **其他普通种子** | ▶️ 恢复运行 | 🗑️ **直接删除** (释放空间) |
 | **全局限速** | 🔓 无限制 | 🔒 全局限速生效 |
 
-## 🚀 部署指南
+<h2 id="deploy">🚀 部署指南</h2>
 
 推荐使用 Docker Compose 进行一键部署。
 
@@ -74,15 +74,15 @@
 ### 2. 配置文件
 创建目录并编写 `docker-compose.yml`：
 
-```bash
+~~~bash
 mkdir -p /root/netcup-monitor/data
 cd /root/netcup-monitor
 nano docker-compose.yml
-```
+~~~
 
 填入以下内容：
 
-```yaml
+~~~yaml
 version: '3.8'
 
 services:
@@ -102,18 +102,29 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - TZ=Asia/Shanghai
-```
+~~~
 
 ### 3. 启动服务
 
-```bash
+~~~bash
 docker compose up -d
-```
+~~~
 访问面板：`http://你的IP:5000`
 
-## ⚙️ 配置详解
+### 4. 容器更新
 
-首次访问点击右上角 **“登录”**（默认密码admin），进入设置页面。
+~~~bash
+# 步骤 1: 强制拉取最新的镜像版本
+docker compose pull
+
+# 步骤 2: 停止旧容器，使用最新镜像重新创建并启动
+docker compose up -d --force-recreate
+~~~
+
+<h2 id="config">⚙️ 配置详解</h2>
+
+首次访问点击右上角 **“登录”**（默认无密码），进入设置页面。
+
 
 ### 1. 基础连接
 * **qBittorrent 设置**：填写 QB 的地址、账号、密码。
@@ -125,12 +136,12 @@ docker compose up -d
 ### 2. Netcup SCP 账号 (核心)
 在“SCP 账号”标签页添加账号。
 * **Customer ID**：Netcup 客户号（数字）。
-* **Password**：登录 Netcup 面板的密码。
+* **Password**：登录 SCP 面板的密码。
 
 > 🔒 **安全提示**：密码仅保存在本地 `data/config.json` 中，通过 Docker 隔离，不会上传第三方。
 
 ### 3. 策略管理
-* **保留分类 (Keep Categories)**：填写分类名，如 `Keep`。这些分类下的种子在限速时只会暂停，不会被删除。
+* **保留分类 (Keep Categories)**：填写分类名，如 `Keep, FRD`。这些分类下的种子在限速时只会暂停，不会被删除。
 * **HR 保护分类**：填写如 `HR, VIP`。
 * **限速上传限制**：设置限速期间 HR 种子的最大上传速度（KB/s），防止长时间无流量被站点判定为不再做种。
 
@@ -148,11 +159,12 @@ docker compose up -d
 ### 流量统计
 *(此处可放置 traffic.png)*
 
-## ⚠️ 免责声明
+<h2 id="disclaimer">⚠️ 免责声明</h2>
 
 1.  **数据安全**：本项目涉及对 qBittorrent 种子的 **删除** 操作。请务必正确配置 “保留分类” 及 “不托管” 选项。
 2.  **账号安全**：Netcup 账号密码存储在你的服务器本地，请确保服务器安全。
 3.  **责任界定**：作者不对因配置错误导致的数据丢失或账号问题负责。
+4.  **项目更新**：懒得更新，又需要可以自己fork仓库修改。
 
 ---
 
