@@ -116,8 +116,9 @@ docker compose up -d
 ~~~bash
 # 步骤 1: 强制拉取最新的镜像版本
 docker compose pull
-# 如果拉取失败: 注销 ghcr.io
-docker logout ghcr.io
+（# 如果拉取失败: 注销 ghcr.io之后重新拉取
+docker logout ghcr.io）
+
 # 步骤 2: 停止旧容器，使用最新镜像重新创建并启动
 docker compose up -d --force-recreate
 ~~~
