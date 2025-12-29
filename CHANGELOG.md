@@ -1,13 +1,4 @@
-Changelog (更新日志)
-
-本项目的所有重要更改都将记录在此文件中。
-
-格式基于 Keep a Changelog，
-并且遵守 Semantic Versioning 语义化版本控制。
-
-[Unreleased]
-
-[v1.1.0] - 2024-05-20
+[v1.1.0] - 2025-12-29
 
 Fixed (修复)
 
@@ -33,7 +24,7 @@ Changed (变更)
 
 优化了 app.py 中的日志记录格式，增加了更详细的时间戳。
 
-[v1.0.0] - 2023-12-01
+[v1.0.0] - 2025-05-01
 
 Initial Release (初始发布)
 
