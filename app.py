@@ -433,6 +433,8 @@ def send_notifications(config):
         
         tg_lines = [f"📊 <b>服务器状态简报</b> ({datetime.datetime.now().strftime('%H:%M')})", ""]
         wx_lines = [f"### 📊 服务器状态简报 ({datetime.datetime.now().strftime('%H:%M')})"]
+        # 新增：纯文本格式，用于适配普通微信应用推送
+        plain_lines = [f"📊 服务器状态简报 ({datetime.datetime.now().strftime('%H:%M')})", ""]
         
         for s in servers:
             name = s['name']
@@ -444,18 +446,26 @@ def send_notifications(config):
             
             status_icon = "✅ 高速" if state == 'high' else "⚠️ 限速"
             
+            # HTML (Telegram)
             tg_lines.append(f"<b>{name}</b>")
             tg_lines.append(f"当前: {status_icon} (持续 {format_duration(dur)})")
             tg_lines.append(f"今日: 高速 {format_duration(t_day_high)} | 限速 {format_duration(t_day_throttled)}\n")
             
+            # Markdown (WeChat Webhook)
             wx_lines.append(f"**{name}**")
             wx_lines.append(f"> 当前: {status_icon} (持续 {format_duration(dur)})")
             wx_lines.append(f"> 今日: 高速 {format_duration(t_day_high)} | 限速 {format_duration(t_day_throttled)}\n")
+            
+            # Pure Text (WeChat App)
+            plain_lines.append(f"【{name}】")
+            plain_lines.append(f"当前: {status_icon} (持续 {format_duration(dur)})")
+            plain_lines.append(f"今日: 高速 {format_duration(t_day_high)} | 限速 {format_duration(t_day_throttled)}\n")
             
         conn.close()
         
         tg_text = "\n".join(tg_lines)
         wx_text = "\n".join(wx_lines)
+        plain_text = "\n".join(plain_lines)
         
         # 1. Telegram
         if notify_mode in ['telegram', 'all']:
@@ -494,12 +504,15 @@ def send_notifications(config):
                     if token_data.get("errcode") == 0:
                         access_token = token_data.get("access_token")
                         send_url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={access_token}"
+                        
+                        # 修改：使用纯文本 (text) 替代 markdown，适配普通微信显示
                         payload = {
                             "touser": "@all",
-                            "msgtype": "markdown",
+                            "msgtype": "text",
                             "agentid": agentid,
-                            "markdown": {"content": wx_text}
+                            "text": {"content": plain_text}
                         }
+                        
                         requests.post(send_url, json=payload, timeout=10)
                         logger.info("企业微信(应用)通知发送成功")
                     else:
