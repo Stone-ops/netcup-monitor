@@ -576,7 +576,8 @@
         if(!isLoggedIn)return; 
         
         // 辅助函数：处理中英文逗号分割
-        const cleanSplit = (str) => str.替换(/，/g, ',').split(',').map(s=>s.trim()).filter(x=>x);
+        const cleanSplit = (str) => (str || '').replace(/，/g, ',').split(',').map(s=>s.trim()).filter(Boolean);
+
 
         config.qb_config={user:document.getElementById('qb_user').value,password:document.getElementById('qb_pass').value,port:parseInt(document.getElementById('qb_port').value)};
         config.vertex_config={api_url:document.getElementById('vt_url').value,api_user:document.getElementById('vt_user').value,api_password:document.getElementById('vt_pass').value,container_name:document.getElementById('vt_container').value};
@@ -600,14 +601,22 @@
         }
 
         const np=document.getElementById('admin_pass').value; if(np)config.admin_password=np;
-        fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(config)}).键，然后(r=>r.json()).键，然后(res=>showToast(res.status==='success'?'配置已保存':'保存失败',res.status==='success'?'success':'error'));
+        fetch('/api/config', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(config)
+        })
+        .then(r => r.json())
+        .then(res => showToast(res.status === 'success' ? '配置已保存' : '保存失败', res.status === 'success' ? 'success' : 'error'))
+        .catch(() => showToast('保存失败', 'error'));
+
     }
     function triggerRun() { fetch('/api/run_now', {method:'POST'}).then(()=>showToast('已触发刷新')); }
 
     function loadLogs() {
         const viewer = document.getElementById('logViewer');
         viewer.innerHTML = "正在刷新日志...";
-        fetch('/api/logs').then(r => r.json()).键，然后(data => {
+        fetch('/api/logs').then(r => r.json()).then(data => {
             if (data.status === 'success') {
                 viewer.innerText = data.data || "（日志文件为空）";
                 viewer.scrollTop = viewer.scrollHeight;
