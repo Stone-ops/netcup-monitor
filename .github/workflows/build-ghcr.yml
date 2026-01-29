@@ -1,13 +1,13 @@
 ﻿name: Build and Push to GHCR
 
-on:
+于:
   push:
-    branches: [ "main" ]
+    分支: [ "main" ]
   workflow_dispatch:
 
 env:
   # 注意：镜像名必须全小写
-  IMAGE_NAME: agonie0v0/netcup-monitor
+  IMAGE_NAME: stone/netcup-monitor
 
 jobs:
   build-and-push:
@@ -32,7 +32,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ env.IMAGE_NAME }}
-          tags: |
+          标签: |
             type=raw,value=latest
             type=sha,format=long
 
@@ -41,5 +41,5 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          标签: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
