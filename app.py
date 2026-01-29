@@ -348,11 +348,12 @@ class EnhancedVertexClient:
         try:
             user = self.conf.get("api_user", "")
             pwd = self.conf.get("api_password", "")
+            otp = self.conf.get("api_optPw", "")  # 默认空
             if not self.base_url or not user: return None
             s = requests.Session()
             try: s.get(f"{self.base_url}/login", timeout=5)
             except: pass
-            payloads = [{"username": user, "password": pwd}, {"username": user, "password": hashlib.md5(pwd.encode()).hexdigest()}]
+            payloads = [ {"username": user, "password": pwd, "otpPw": otp},{"username": user, "password": hashlib.md5(pwd.encode()).hexdigest(), "otpPw": otp},]
             for p in payloads:
                 try:
                     r = s.post(f"{self.base_url}/api/user/login", json=p, timeout=10)
