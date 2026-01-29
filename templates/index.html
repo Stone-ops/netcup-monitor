@@ -252,6 +252,13 @@
                             <div class="col-sm-9"><input id="vt_pass" type="password" class="form-control w-medium"></div>
                         </div>
                         <div class="mb-3 row align-items-center">
+                        <label class="col-sm-3 col-form-label">OTP</label>
+                        <div class="col-sm-9">
+                            <input id="vt_otp" class="form-control w-medium" placeholder="默认留空">
+                            <div class="form-hint">不开启 2FA 可留空</div>
+                        </div>
+                        </div>
+                        <div class="mb-3 row align-items-center">
                             <label class="col-sm-3 col-form-label">容器名</label>
                             <div class="col-sm-9">
                                 <input id="vt_container" class="form-control w-compact" placeholder="vertex">
@@ -510,7 +517,11 @@
     function fetchConfig() { if(!isLoggedIn)return; fetch('/api/config').then(r=>r.json()).then(d => { config = d; renderForms(); }); }
     function renderForms() {
         document.getElementById('qb_user').value = config.qb_config?.user||''; document.getElementById('qb_pass').value = config.qb_config?.password||''; document.getElementById('qb_port').value = config.qb_config?.port||''; 
-        document.getElementById('vt_url').value = config.vertex_config?.api_url||''; document.getElementById('vt_user').value = config.vertex_config?.api_user||''; document.getElementById('vt_pass').value = config.vertex_config?.api_password||''; document.getElementById('vt_container').value = config.vertex_config?.container_name||'vertex';
+        document.getElementById('vt_url').value = config.vertex_config?.api_url||''; 
+        document.getElementById('vt_user').value = config.vertex_config?.api_user||''; 
+        document.getElementById('vt_pass').value = config.vertex_config?.api_password||''; 
+        document.getElementById('vt_container').value = config.vertex_config?.container_name||'vertex';
+        document.getElementById('vt_otp').value = config.vertex_config?.otpPw||'';   // 新增 OTP 字段
         document.getElementById('rss_ids').value = (config.rss_ids || []).join(', ');
         document.getElementById('keep_cats').value = (config.keep_categories||[]).join(','); 
         document.getElementById('hr_cats').value = (config.hr_config?.categories || []).join(','); document.getElementById('hr_limit').value = config.hr_config?.upload_limit_kb || 10;
@@ -580,7 +591,12 @@
 
 
         config.qb_config={user:document.getElementById('qb_user').value,password:document.getElementById('qb_pass').value,port:parseInt(document.getElementById('qb_port').value)};
-        config.vertex_config={api_url:document.getElementById('vt_url').value,api_user:document.getElementById('vt_user').value,api_password:document.getElementById('vt_pass').value,container_name:document.getElementById('vt_container').value};
+        config.vertex_config={
+        api_url:document.getElementById('vt_url').value,
+        api_user:document.getElementById('vt_user').value,
+        api_password:document.getElementById('vt_pass').value,
+        otpPw: document.getElementById('vt_otp').value,  
+        container_name:document.getElementById('vt_container').value};
         delete config.rss_dir; 
         
         config.rss_ids = cleanSplit(document.getElementById('rss_ids').value);
