@@ -1,8 +1,8 @@
-﻿name: Build and Push to GHCR
+name: Build and Push to GHCR
 
-于:
+on:
   push:
-    分支: [ "main" ]
+    branches: [ "main" ]
   workflow_dispatch:
 
 env:
@@ -32,7 +32,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ env.IMAGE_NAME }}
-          标签: |
+          tags: |
             type=raw,value=latest
             type=sha,format=long
 
@@ -41,5 +41,5 @@ jobs:
         with:
           context: .
           push: true
-          标签: ${{ steps.meta.outputs.tags }}
+          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
