@@ -23,10 +23,16 @@ LOG_FILE = os.path.join(DATA_DIR, 'nc_monitor.log')
 
 last_notify_time = 0
 
+# 单次采样允许的最大增长（用于过滤异常点）
+# 默认 500GB/次（5分钟采样在 10Gbps 场景也足够保守）；如有更高带宽可调大
+MAX_DIFF_BYTES = int(os.environ.get("NC_MAX_DIFF_BYTES", str(500 * 1024 * 1024 * 1024)))
+
+
 def setup_logging():
     logger = logging.getLogger('NC_Monitor')
     logger.setLevel(logging.INFO)
-    if logger.hasHandlers(): logger.handlers.clear()
+    if logger.hasHandlers():
+        logger.handlers.clear()
 
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - [%(funcName)s:%(lineno)d] - %(message)s')
 
@@ -34,12 +40,14 @@ def setup_logging():
     sh.setFormatter(formatter)
     logger.addHandler(sh)
 
-    if not os.path.exists(DATA_DIR): os.makedirs(DATA_DIR)
+    if not os.path.exists(DATA_DIR):
+        os.makedirs(DATA_DIR)
 
     fh = TimedRotatingFileHandler(filename=LOG_FILE, when='midnight', interval=1, backupCount=1, encoding='utf-8')
     fh.setFormatter(formatter)
     logger.addHandler(fh)
     return logger
+
 
 logger = setup_logging()
 
@@ -48,7 +56,8 @@ app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 
 # ===================== 数据库初始化 =====================
 def init_db():
-    if not os.path.exists(DATA_DIR): os.makedirs(DATA_DIR)
+    if not os.path.exists(DATA_DIR):
+        os.makedirs(DATA_DIR)
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS traffic_log
@@ -60,41 +69,93 @@ def init_db():
     conn.commit()
     conn.close()
 
+
 init_db()
 
 # ===================== 工具函数 =====================
 def load_config():
     try:
-        if not os.path.exists(CONFIG_FILE): return {}
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f: return json.load(f)
+        if not os.path.exists(CONFIG_FILE):
+            return {}
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
     except Exception as e:
         logger.error(f"加载配置文件失败: {e}")
         return {}
 
+
 def save_config_file(data):
     try:
-        with open(CONFIG_FILE, 'w', encoding='utf-8') as f: json.dump(data, f, indent=2, ensure_ascii=False)
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
         logger.info("配置文件已更新并保存")
     except Exception as e:
         logger.error(f"保存配置文件失败: {e}")
 
+
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
+
 
 def format_duration(seconds):
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
     return f"{h}h{m}m"
 
+
+def get_last_totals(conn, name):
+    c = conn.cursor()
+    c.execute(
+        "SELECT up_total, dl_total FROM traffic_log WHERE server_name=? ORDER BY timestamp DESC LIMIT 1",
+        (name,),
+    )
+    row = c.fetchone()
+    if not row:
+        return None
+    return int(row[0] or 0), int(row[1] or 0)
+
+
+def is_valid_totals_sample(prev, up, dl):
+    # qB 的累计值必须是非负整数
+    if up is None or dl is None:
+        return False
+    try:
+        up = int(up)
+        dl = int(dl)
+    except Exception:
+        return False
+    if up < 0 or dl < 0:
+        return False
+
+    # 避免“采集失败写 0”污染：如果上一条已经是大数，这次突然 0 基本可判定异常
+    if prev:
+        prev_u, prev_d = prev
+        if up == 0 and dl == 0 and (prev_u > 0 or prev_d > 0):
+            return False
+
+        # 进一步过滤异常暴涨：如果单次增长超过阈值，判为异常点（可能是采集漂移/恢复）
+        du = up - prev_u
+        dd = dl - prev_d
+        if du > MAX_DIFF_BYTES or dd > MAX_DIFF_BYTES:
+            return False
+
+    return True
+
+
 def log_to_db(name, state, up_total, dl_total):
     try:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         now = time.time()
-        c.execute("INSERT INTO traffic_log (server_name, timestamp, up_total, dl_total, state) VALUES (?, ?, ?, ?, ?)",
-                  (name, now, up_total, dl_total, state))
+        c.execute(
+            "INSERT INTO traffic_log (server_name, timestamp, up_total, dl_total, state) VALUES (?, ?, ?, ?, ?)",
+            (name, now, int(up_total or 0), int(dl_total or 0), state),
+        )
 
-        c.execute("SELECT id, state, start_time FROM state_events WHERE server_name=? AND end_time IS NULL ORDER BY id DESC LIMIT 1", (name,))
+        c.execute(
+            "SELECT id, state, start_time FROM state_events WHERE server_name=? AND end_time IS NULL ORDER BY id DESC LIMIT 1",
+            (name,),
+        )
         last_event = c.fetchone()
 
         if last_event:
@@ -114,38 +175,72 @@ def log_to_db(name, state, up_total, dl_total):
     except Exception as e:
         logger.error(f"数据库写入错误: {e}")
 
+
 # ===================== 数据计算逻辑 (包含趋势) =====================
 def calculate_traffic(conn, name):
     now = datetime.datetime.now()
     m_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
     t_start = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     c = conn.cursor()
-    c.execute("SELECT timestamp, up_total, dl_total FROM traffic_log WHERE server_name=? AND timestamp >= ? ORDER BY timestamp ASC", (name, m_start))
+    c.execute(
+        "SELECT timestamp, up_total, dl_total FROM traffic_log WHERE server_name=? AND timestamp >= ? ORDER BY timestamp ASC",
+        (name, m_start),
+    )
     rows = c.fetchall()
 
-    cur_u, cur_d = 0, 0
-    u_day, d_day, u_mon, d_mon = 0, 0, 0, 0
+    u_day = d_day = u_mon = d_mon = 0
+    cur_u = cur_d = 0
 
-    if rows:
-        cur_u, cur_d = rows[-1][1], rows[-1][2]
-        c.execute("SELECT MIN(timestamp) FROM traffic_log WHERE server_name=?", (name,))
-        first_ts = c.fetchone()[0] or m_start
-        eff_start = max(m_start, first_ts)
-        delta_days = (now.timestamp() - eff_start) / 86400
-        eff_days = max(1, math.ceil(delta_days))
+    if not rows:
+        return 0, 0, 0, 0, 0, 0, 0, 0
 
-        prev_u, prev_d = rows[0][1], rows[0][2]
-        for i in range(1, len(rows)):
-            ts, u, d = rows[i]
-            du, dd = u - prev_u, d - prev_d
-            if du < 0: du = u
-            if dd < 0: dd = d
-            u_mon += du; d_mon += dd
-            if ts >= t_start: u_day += du; d_day += dd
+    # 当前累计值：取最近有效（非 0）点，避免末尾异常点把 current 显示成 0
+    for ts, u, d in reversed(rows):
+        u = int(u or 0)
+        d = int(d or 0)
+        if u > 0 or d > 0:
+            cur_u, cur_d = u, d
+            break
+    else:
+        cur_u, cur_d = int(rows[-1][1] or 0), int(rows[-1][2] or 0)
+
+    c.execute("SELECT MIN(timestamp) FROM traffic_log WHERE server_name=?", (name,))
+    first_ts = c.fetchone()[0] or m_start
+    eff_start = max(m_start, first_ts)
+    delta_days = (now.timestamp() - eff_start) / 86400
+    eff_days = max(1, math.ceil(delta_days))
+
+    prev_u = int(rows[0][1] or 0)
+    prev_d = int(rows[0][2] or 0)
+
+    for i in range(1, len(rows)):
+        ts, u, d = rows[i]
+        u = int(u or 0)
+        d = int(d or 0)
+
+        du = u - prev_u
+        dd = d - prev_d
+
+        # reset/回退：不把 curr 当 diff（会导致“0->大数”炸），直接跳过并重置基线
+        if du < 0 or dd < 0:
             prev_u, prev_d = u, d
+            continue
 
-        return u_day, d_day, u_mon, d_mon, cur_u, cur_d, u_mon/eff_days, d_mon/eff_days
-    return 0,0,0,0,0,0,0,0
+        # 异常暴涨：忽略并重置基线
+        if du > MAX_DIFF_BYTES or dd > MAX_DIFF_BYTES:
+            prev_u, prev_d = u, d
+            continue
+
+        u_mon += du
+        d_mon += dd
+        if ts >= t_start:
+            u_day += du
+            d_day += dd
+
+        prev_u, prev_d = u, d
+
+    return u_day, d_day, u_mon, d_mon, cur_u, cur_d, u_mon / eff_days, d_mon / eff_days
+
 
 def calculate_health(conn, name):
     now = time.time()
@@ -157,7 +252,10 @@ def calculate_health(conn, name):
     state = curr[0] if curr else 'unknown'
     dur = (now - curr[1]) if curr else 0
 
-    c.execute("SELECT start_time, end_time FROM state_events WHERE server_name=? AND state='low' AND (end_time >= ? OR end_time IS NULL)", (name, today))
+    c.execute(
+        "SELECT start_time, end_time FROM state_events WHERE server_name=? AND state='low' AND (end_time >= ? OR end_time IS NULL)",
+        (name, today),
+    )
     t_day = sum([min(end or now, now) - max(start, today) for start, end in c.fetchall() if min(end or now, now) > max(start, today)])
 
     c.execute("SELECT MIN(timestamp) FROM traffic_log WHERE server_name=?", (name,))
@@ -171,10 +269,12 @@ def calculate_health(conn, name):
     c.execute("SELECT SUM(duration) FROM state_events WHERE server_name=? AND state='low' AND end_time IS NOT NULL", (name,))
     db_low = c.fetchone()[0] or 0
     all_low = db_low
-    if state == 'low': all_low += dur
+    if state == 'low':
+        all_low += dur
     avg_daily = all_low / days
 
     return state, dur, t_day, avg_daily
+
 
 def get_daily_trends(conn, server_list):
     dates = []
@@ -190,9 +290,15 @@ def get_daily_trends(conn, server_list):
         trends[name] = {'health': [], 'traffic': []}
         start_7d = (datetime.datetime.now() - datetime.timedelta(days=7)).timestamp()
         c = conn.cursor()
-        c.execute("SELECT timestamp, up_total, dl_total FROM traffic_log WHERE server_name=? AND timestamp >= ? ORDER BY timestamp ASC", (name, start_7d))
+        c.execute(
+            "SELECT timestamp, up_total, dl_total FROM traffic_log WHERE server_name=? AND timestamp >= ? ORDER BY timestamp ASC",
+            (name, start_7d),
+        )
         logs = c.fetchall()
-        c.execute("SELECT start_time, end_time FROM state_events WHERE server_name=? AND state='low' AND (end_time >= ? OR end_time IS NULL)", (name, start_7d))
+        c.execute(
+            "SELECT start_time, end_time FROM state_events WHERE server_name=? AND state='low' AND (end_time >= ? OR end_time IS NULL)",
+            (name, start_7d),
+        )
         events = c.fetchall()
 
         for i in range(6, -1, -1):
@@ -203,13 +309,24 @@ def get_daily_trends(conn, server_list):
             day_logs = [l for l in logs if day_start <= l[0] <= day_end]
             if day_logs:
                 daily_sum = 0
-                prev_total = day_logs[0][1] + day_logs[0][2]
+                prev_total = int(day_logs[0][1] or 0) + int(day_logs[0][2] or 0)
                 for j in range(1, len(day_logs)):
-                    curr_total = day_logs[j][1] + day_logs[j][2]
+                    curr_total = int(day_logs[j][1] or 0) + int(day_logs[j][2] or 0)
                     diff = curr_total - prev_total
-                    if diff >= 0: daily_sum += diff
-                    else: daily_sum += curr_total
+
+                    if diff < 0:
+                        # reset/回退：不计入当天流量，重置基线
+                        prev_total = curr_total
+                        continue
+
+                    if diff > (2 * MAX_DIFF_BYTES):
+                        # 合并上下行后的 diff 给更宽松阈值
+                        prev_total = curr_total
+                        continue
+
+                    daily_sum += diff
                     prev_total = curr_total
+
                 trends[name]['traffic'].append(round(daily_sum / 1024 / 1024 / 1024, 2))
             else:
                 trends[name]['traffic'].append(0)
@@ -225,9 +342,12 @@ def get_daily_trends(conn, server_list):
 
     return dates, trends
 
+
 # ===================== 路由与任务 =====================
 @app.route('/')
-def index(): return render_template('index.html')
+def index():
+    return render_template('index.html')
+
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
@@ -247,7 +367,8 @@ def login():
         pln = cfg.get('admin_password', 'admin')
         if pwd == pln:
             cfg['admin_password_hash'] = h
-            if 'admin_password' in cfg: del cfg['admin_password']
+            if 'admin_password' in cfg:
+                del cfg['admin_password']
             save_config_file(cfg)
             session['logged_in'] = True
             logger.info(f"管理员登录成功并初始化哈希 (IP: {ip})")
@@ -256,40 +377,51 @@ def login():
     logger.warning(f"管理员登录失败 (IP: {ip})")
     return jsonify({"status": "error"}), 401
 
+
 @app.route('/api/auth/logout', methods=['POST'])
 def logout():
     session.pop('logged_in', None)
     return jsonify({"status": "success"})
 
+
 @app.route('/api/auth/status')
-def check_status(): return jsonify({"logged_in": session.get('logged_in', False)})
+def check_status():
+    return jsonify({"logged_in": session.get('logged_in', False)})
+
 
 @app.route('/api/config', methods=['GET', 'POST'])
 def handle_config():
     if request.method == 'POST':
-        if not session.get('logged_in'): return jsonify({"status": "error"}), 401
+        if not session.get('logged_in'):
+            return jsonify({"status": "error"}), 401
         new_c = request.json
         if new_c.get('admin_password'):
             new_c['admin_password_hash'] = hash_password(new_c['admin_password'])
             del new_c['admin_password']
         elif 'admin_password_hash' not in new_c:
             old = load_config()
-            if 'admin_password_hash' in old: new_c['admin_password_hash'] = old['admin_password_hash']
+            if 'admin_password_hash' in old:
+                new_c['admin_password_hash'] = old['admin_password_hash']
         save_config_file(new_c)
         return jsonify({"status": "success"})
-    if not session.get('logged_in'): return jsonify({})
+    if not session.get('logged_in'):
+        return jsonify({})
     return jsonify(load_config())
+
 
 @app.route('/api/run_now', methods=['POST'])
 def manual_run():
-    if not session.get('logged_in'): return jsonify({"status": "error"}), 401
+    if not session.get('logged_in'):
+        return jsonify({"status": "error"}), 401
     logger.info(f"用户触发手动刷新 (IP: {request.remote_addr})")
     scheduler.get_job('monitor_job').modify(next_run_time=datetime.datetime.now())
     return jsonify({"status": "ok"})
 
+
 @app.route('/api/logs')
 def get_logs():
-    if not session.get('logged_in'): return jsonify({"status": "error"}), 401
+    if not session.get('logged_in'):
+        return jsonify({"status": "error"}), 401
     try:
         if os.path.exists(LOG_FILE):
             with open(LOG_FILE, 'r', encoding='utf-8') as f:
@@ -299,6 +431,7 @@ def get_logs():
     except Exception as e:
         logger.error(f"读取日志文件失败: {e}")
         return jsonify({"status": "error", "message": str(e)})
+
 
 @app.route('/api/stats_advanced')
 def get_stats_advanced():
@@ -315,15 +448,32 @@ def get_stats_advanced():
         st, dur, t_day, t_avg = calculate_health(conn, n)
 
         summ['total'] += 1
-        if st == 'unknown': summ['offline'] += 1
-        else: summ[st] += 1
+        if st == 'unknown':
+            summ['offline'] += 1
+        else:
+            summ[st] += 1
 
         obj = {
-            'name': n, 'status': st,
-            'traffic': { 'qb_current_up': c_u, 'qb_current_dl': c_d, 'up_today': u_d, 'dl_today': d_d, 'up_month': u_m, 'dl_month': d_m, 'up_daily_avg': u_avg, 'dl_daily_avg': d_avg },
-            'health': { 'current_duration': dur, 'today_throttled': t_day, 'avg_daily_throttled': t_avg }
+            'name': n,
+            'status': st,
+            'traffic': {
+                'qb_current_up': c_u,
+                'qb_current_dl': c_d,
+                'up_today': u_d,
+                'dl_today': d_d,
+                'up_month': u_m,
+                'dl_month': d_m,
+                'up_daily_avg': u_avg,
+                'dl_daily_avg': d_avg
+            },
+            'health': {
+                'current_duration': dur,
+                'today_throttled': t_day,
+                'avg_daily_throttled': t_avg
+            }
         }
-        if is_admin: obj['ip'] = s['ip']
+        if is_admin:
+            obj['ip'] = s['ip']
         res.append(obj)
 
     trend_dates, trends = get_daily_trends(conn, servers)
@@ -336,24 +486,33 @@ def get_stats_advanced():
         'trends': {'dates': trend_dates, 'data': trends}
     })
 
+
 # ===================== Vertex 客户端 =====================
 class EnhancedVertexClient:
     def __init__(self, config):
         self.conf = config.get("vertex_config", {})
         base_url = self.conf.get("api_url", "")
-        if base_url and not base_url.startswith(('http://', 'https://')): base_url = 'http://' + base_url
+        if base_url and not base_url.startswith(('http://', 'https://')):
+            base_url = 'http://' + base_url
         self.base_url = base_url.rstrip('/')
         self.container_name = self.conf.get("container_name", "vertex")
+
     def get_new_sid(self):
         try:
             user = self.conf.get("api_user", "")
             pwd = self.conf.get("api_password", "")
             otp = self.conf.get("api_optPw", "")  # 默认空
-            if not self.base_url or not user: return None
+            if not self.base_url or not user:
+                return None
             s = requests.Session()
-            try: s.get(f"{self.base_url}/login", timeout=5)
-            except: pass
-            payloads = [ {"username": user, "password": pwd, "otpPw": otp},{"username": user, "password": hashlib.md5(pwd.encode()).hexdigest(), "otpPw": otp},]
+            try:
+                s.get(f"{self.base_url}/login", timeout=5)
+            except Exception:
+                pass
+            payloads = [
+                {"username": user, "password": pwd, "otpPw": otp},
+                {"username": user, "password": hashlib.md5(pwd.encode()).hexdigest(), "otpPw": otp},
+            ]
             for p in payloads:
                 try:
                     r = s.post(f"{self.base_url}/api/user/login", json=p, timeout=10)
@@ -362,65 +521,94 @@ class EnhancedVertexClient:
                         self._save_sid(sid)
                         logger.info("Vertex 重新登录成功，获取新 SID")
                         return sid
-                except: continue
+                except Exception:
+                    continue
             logger.warning("Vertex 登录失败")
             return None
         except Exception as e:
             logger.error(f"Vertex 客户端初始化错误: {e}")
             return None
+
     def _save_sid(self, sid):
         try:
             full = load_config()
-            if "vertex_config" not in full: full["vertex_config"] = {}
+            if "vertex_config" not in full:
+                full["vertex_config"] = {}
             full["vertex_config"]["connect_sid"] = sid
             save_config_file(full)
-        except: pass
+        except Exception:
+            pass
+
     def list_rss_rules(self):
         sid = self.conf.get("connect_sid")
         data = self._do_list(sid)
         if data is None:
             new_sid = self.get_new_sid()
-            if new_sid: return self._do_list(new_sid)
+            if new_sid:
+                return self._do_list(new_sid)
         return data
+
     def _do_list(self, sid):
         try:
             url = f"{self.base_url}/api/rss/list"
             r = requests.get(url, cookies={"connect.sid": sid}, timeout=10)
             if r.status_code == 200:
                 res_json = r.json()
-                if res_json.get("success"): return res_json.get("data", [])
+                if res_json.get("success"):
+                    return res_json.get("data", [])
             return None
-        except: return None
+        except Exception:
+            return None
+
     def update_rss(self, rss_data):
         sid = self.conf.get("connect_sid")
         if not self._do_update(rss_data, sid):
             new_sid = self.get_new_sid()
-            if new_sid: return self._do_update(rss_data, new_sid)
+            if new_sid:
+                return self._do_update(rss_data, new_sid)
             return False
         return True
+
     def _do_update(self, data, sid):
         try:
             url = f"{self.base_url}/api/rss/modify"
-            r = requests.post(url, json=data, cookies={"connect.sid": sid}, headers={"Content-Type": "application/json"}, timeout=10)
+            r = requests.post(
+                url,
+                json=data,
+                cookies={"connect.sid": sid},
+                headers={"Content-Type": "application/json"},
+                timeout=10
+            )
             success = r.status_code == 200 and "成功" in r.text
-            if not success: logger.warning(f"Vertex RSS 更新响应异常: {r.text[:100]}")
+            if not success:
+                logger.warning(f"Vertex RSS 更新响应异常: {r.text[:100]}")
             return success
         except Exception as e:
             logger.error(f"Vertex RSS 更新请求失败: {e}")
             return False
+
     def restart_container(self):
-        if "localhost" not in self.base_url and "127.0.0.1" not in self.base_url: return False
+        if "localhost" not in self.base_url and "127.0.0.1" not in self.base_url:
+            return False
         try:
-            subprocess.run(["docker", "restart", self.container_name], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            subprocess.run(
+                ["docker", "restart", self.container_name],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30
+            )
             logger.info("Vertex 容器重启命令已执行")
             return True
         except Exception as e:
             logger.error(f"Vertex 容器重启失败: {e}")
             return False
 
+
 def send_notifications(config):
     global last_notify_time
-    if time.time() - last_notify_time < 7200: return
+    if time.time() - last_notify_time < 7200:
+        return
 
     notify_mode = config.get("notify_mode", "telegram")
 
@@ -466,9 +654,14 @@ def send_notifications(config):
             chat_id = tg_conf.get("chat_id")
             if token and chat_id:
                 try:
-                    requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={"chat_id": chat_id, "text": tg_text, "parse_mode": "HTML"}, timeout=10)
+                    requests.post(
+                        f"https://api.telegram.org/bot{token}/sendMessage",
+                        json={"chat_id": chat_id, "text": tg_text, "parse_mode": "HTML"},
+                        timeout=10
+                    )
                     logger.info("Telegram 通知发送成功")
-                except Exception as e: logger.error(f"Telegram 发送失败: {e}")
+                except Exception as e:
+                    logger.error(f"Telegram 发送失败: {e}")
 
         if notify_mode in ['wechat', 'all']:
             wx_key = config.get("wechat_config", {}).get("key")
@@ -477,7 +670,8 @@ def send_notifications(config):
                     url = f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={wx_key}"
                     requests.post(url, json={"msgtype": "markdown", "markdown": {"content": wx_text}}, timeout=10)
                     logger.info("企业微信(Webhook)通知发送成功")
-                except Exception as e: logger.error(f"企业微信(Webhook)发送失败: {e}")
+                except Exception as e:
+                    logger.error(f"企业微信(Webhook)发送失败: {e}")
 
         if notify_mode in ['wechat_app', 'all']:
             try:
@@ -497,17 +691,21 @@ def send_notifications(config):
                         logger.info("企业微信(应用)通知发送成功")
                     else:
                         logger.error(f"企业微信应用Token获取失败: {token_data}")
-            except Exception as e: logger.error(f"企业微信(应用)发送失败: {e}")
+            except Exception as e:
+                logger.error(f"企业微信(应用)发送失败: {e}")
 
         last_notify_time = time.time()
 
-    except Exception as e: logger.error(f"构建通知时出错: {e}")
+    except Exception as e:
+        logger.error(f"构建通知时出错: {e}")
+
 
 # ===================== 主监控循环 =====================
 def run_monitor_task():
     logger.info(">>> 开始周期性检测...")
     config = load_config()
-    if not config: return
+    if not config:
+        return
     SERVERS = config.get("servers", [])
 
     KEEP_CATS = config.get("keep_categories", [])
@@ -557,7 +755,8 @@ def run_monitor_task():
     if soap:
         try:
             wsdl_url = soap.get("wsdl_url")
-            if not wsdl_url: wsdl_url = "https://www.servercontrolpanel.de/WSEndUser?wsdl"
+            if not wsdl_url:
+                wsdl_url = "https://www.servercontrolpanel.de/WSEndUser?wsdl"
             client = Client(wsdl_url)
             targets = [s['ip'] for s in SERVERS]
             for acc in soap.get("accounts", []):
@@ -579,20 +778,49 @@ def run_monitor_task():
         qb_port = s.get('qb_port')
 
         is_unmanaged = s.get('unmanaged', False)
-        up, dl = 0, 0
+
+        # 获取上一条累计值，用于判断本次采集是否异常；同时用于失败时回退
+        try:
+            conn_prev = sqlite3.connect(DB_FILE)
+            prev_totals = get_last_totals(conn_prev, name)
+            conn_prev.close()
+        except Exception:
+            prev_totals = None
+
+        up = None
+        dl = None
         r = qb_req(ip, "/transfer/info", port=qb_port)
         if r and r.status_code == 200:
-            d = r.json()
-            up, dl = d.get('up_info_data', 0), d.get('dl_info_data', 0)
+            try:
+                d = r.json()
+                up = d.get('up_info_data', None)
+                dl = d.get('dl_info_data', None)
+            except Exception:
+                up, dl = None, None
+
         is_throttled = vps_status.get(ip, False)
         state = 'low' if is_throttled else 'high'
-        log_to_db(name, state, up, dl)
+
+        # 采集失败/异常样本：不写 0，回退到上一条，避免污染和跳变
+        if is_valid_totals_sample(prev_totals, up, dl):
+            log_to_db(name, state, int(up), int(dl))
+        else:
+            if prev_totals:
+                log_to_db(name, state, prev_totals[0], prev_totals[1])
+                logger.warning(f"[{name}] QB totals invalid, fallback to previous totals")
+            else:
+                log_to_db(name, state, 0, 0)
+                logger.warning(f"[{name}] QB totals invalid and no previous totals, wrote 0 as first record")
+
         if not is_unmanaged and not is_throttled:
-            if s.get('client_id'): good_clients.append(s['client_id'])
+            if s.get('client_id'):
+                good_clients.append(s['client_id'])
+
         if not is_unmanaged:
             torrents = []
             tr = qb_req(ip, "/torrents/info", port=qb_port)
-            if tr and tr.status_code == 200: torrents = tr.json()
+            if tr and tr.status_code == 200:
+                torrents = tr.json()
 
             restore_file = os.path.join(DATA_DIR, f'restore_{ip}.json')
 
@@ -602,7 +830,8 @@ def run_monitor_task():
                     try:
                         with open(restore_file, 'r', encoding='utf-8') as f:
                             restore_data = json.load(f)
-                    except: pass
+                    except Exception:
+                        pass
 
                 data_changed = False
 
@@ -628,7 +857,12 @@ def run_monitor_task():
                         logger.error(f"[{name}] Failed to save restore data: {e}")
 
                 if hr_hashes_seeding:
-                    qb_req(ip, "/torrents/setUploadLimit", data={"hashes": "|".join(hr_hashes_seeding), "limit": HR_LIMIT_BYTES}, port=qb_port)
+                    qb_req(
+                        ip,
+                        "/torrents/setUploadLimit",
+                        data={"hashes": "|".join(hr_hashes_seeding), "limit": HR_LIMIT_BYTES},
+                        port=qb_port
+                    )
                     logger.info(f"[{name}] HR Policy (Seeding): Limited {len(hr_hashes_seeding)} torrents")
 
                 if hr_hashes_downloading:
@@ -640,14 +874,17 @@ def run_monitor_task():
                     qb_req(ip, "/torrents/delete", data={"hashes": "|".join(non_keep), "deleteFiles": "true"}, port=qb_port)
                     logger.info(f"[{name}] Deleted {len(non_keep)} non-keep torrents")
 
-                keep_active = [t['hash'] for t in torrents if t.get('category') in KEEP_CATS and t.get('category') not in HR_CATS and t.get('state') not in ['stoppedUP', 'stoppedDL', 'pausedUP', 'pausedDL']]
+                keep_active = [
+                    t['hash'] for t in torrents
+                    if t.get('category') in KEEP_CATS
+                    and t.get('category') not in HR_CATS
+                    and t.get('state') not in ['stoppedUP', 'stoppedDL', 'pausedUP', 'pausedDL']
+                ]
                 if keep_active:
                     qb_smart_action(ip, "stop", "|".join(keep_active), port=qb_port)
                     logger.info(f"[{name}] Paused {len(keep_active)} keep torrents")
 
                 # 重要修复：只要处于限速状态，必须保证 restore_file 存在
-                # 即使没有 HR 种子限速数据，文件本身的存在也是“限速中”的标记
-                # 这样恢复逻辑 (if os.path.exists(restore_file)) 才能被触发
                 if not os.path.exists(restore_file):
                     try:
                         with open(restore_file, 'w', encoding='utf-8') as f:
@@ -665,7 +902,8 @@ def run_monitor_task():
 
                         limit_groups = {}
                         for t_hash, limit in restore_data.items():
-                            if limit not in limit_groups: limit_groups[limit] = []
+                            if limit not in limit_groups:
+                                limit_groups[limit] = []
                             limit_groups[limit].append(t_hash)
 
                         for limit, hashes in limit_groups.items():
@@ -675,12 +913,13 @@ def run_monitor_task():
                     except Exception as e:
                         logger.error(f"[{name}] Failed to restore limits: {e}")
 
-                    # 修复：使用 resume 替代 start，并恢复所有种子
                     qb_smart_action(ip, "resume", "all", port=qb_port)
                     logger.info(f"[{name}] Resumed all torrents")
 
-                    try: os.remove(restore_file)
-                    except: pass
+                    try:
+                        os.remove(restore_file)
+                    except Exception:
+                        pass
 
     target_rss_ids = config.get("rss_ids", [])
     if target_rss_ids and config.get("vertex_config", {}).get("use_api_update", True):
@@ -696,15 +935,19 @@ def run_monitor_task():
                         logger.info(f"RSS [{rule.get('alias', rule_id)}] 需更新: {len(current_clients)} -> {len(target_clients)}")
                         rule['clientArr'] = list(target_clients)
                         rule['enable'] = bool(target_clients)
-                        if vertex.update_rss(rule): logger.info(f"RSS API 更新成功")
+                        if vertex.update_rss(rule):
+                            logger.info("RSS API 更新成功")
                         else:
-                            logger.error(f"RSS API 更新失败")
+                            logger.error("RSS API 更新失败")
                             need_restart = True
-        else: logger.warning("无法获取 RSS 规则列表")
-        if need_restart: vertex.restart_container()
+        else:
+            logger.warning("无法获取 RSS 规则列表")
+        if need_restart:
+            vertex.restart_container()
 
     send_notifications(config)
     logger.info("<<< 检测完成")
+
 
 scheduler = BackgroundScheduler()
 scheduler.add_job(run_monitor_task, 'interval', minutes=5, id='monitor_job')
